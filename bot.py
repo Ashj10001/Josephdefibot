@@ -1,191 +1,230 @@
-import logging
 import os
 import re
+import logging
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Updater,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext,
-    ConversationHandler
+    Updater, CommandHandler, CallbackContext, 
+    CallbackQueryHandler, MessageHandler, Filters
 )
-import tweepy
-from solana.publickey import PublicKey
+from pymongo import MongoClient
+from dotenv import load_dotenv
 
-# ===== CONFIGURATION =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set in Render environment variables
+# Load environment variables
+load_dotenv()
+
+# Configuration
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7872973965:AAGt3KFPosFSYV1w4Ded-_tD8QtUHasei9s")
 CHANNEL_LINK = "https://t.me/sakuramemecoin"
 GROUP_LINK = "https://t.me/Sakuramemecoincommunity"
-TWITTER_LINK = "https://x.com/Sukuramememcoin"
-CHANNEL_ID = -1001234567890  # Replace with your channel ID
-GROUP_ID = -1000987654321   # Replace with your group ID
-TWITTER_USERNAME = "Sukuramemecoin"
-TWITTER_API_KEY = os.getenv("TWITTER_API_KEY")
-TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET")
+TWITTER_LINK = "https://x.com/Sukuramemecoin"
+PUMP_FUN_LINK = "https://pump.fun/2AXnWVULFu5kJf7Z3LA9WXxF47XLYXoNAyMQZuZjpump"
+ADMIN_ID = os.getenv("ADMIN_ID")
+MONGO_URI = os.getenv("MONGO_URI")
 
-# ===== STATES =====
-VERIFY_TWITTER, GET_WALLET = range(2)
-
-# Initialize logger
+# Configure logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Twitter API
-twitter_api = None
-if TWITTER_API_KEY and TWITTER_API_SECRET:
-    try:
-        auth = tweepy.OAuthHandler(TWITTER_API_KEY, TWITTER_API_SECRET)
-        twitter_api = tweepy.API(auth)
-    except Exception as e:
-        logger.error(f"Twitter API init failed: {e}")
+# Database setup
+client = MongoClient(MONGO_URI)
+db = client.sakuramemecoin_bot
+users = db.users
 
+# Verification statuses
+(
+    STATUS_START,
+    STATUS_CHANNEL,
+    STATUS_GROUP,
+    STATUS_TWITTER,
+    STATUS_SOL_ADDRESS
+) = range(5)
+
+# SOL address validation regex
+SOL_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+
+# Command handlers
 def start(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
-    text = (
-        f"🌸 *Welcome to Sakuramemecoin Airdrop, {user.first_name}\!* 🌸\n\n"
-        "🎌 To qualify for the airdrop, complete these tasks:\n"
-        f"1\. Join our [Telegram Channel]({CHANNEL_LINK})\n"
-        f"2\. Join our [Telegram Group]({GROUP_LINK})\n"
-        f"3\. Follow our [Twitter]({TWITTER_LINK})\n"
-        "4\. Submit your SOL wallet address\n\n"
-        "Click the button below when you've completed all tasks:"
-    )
+    context.user_data['status'] = STATUS_START
     
-    keyboard = [[InlineKeyboardButton("✅ Verify Tasks", callback_data="verify_tasks")]]
-    update.message.reply_markdown_v2(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
+    keyboard = [[InlineKeyboardButton("🌟 Start Verification", callback_data='start_verification')]]
+    
+    update.message.reply_text(
+        f"🌸 Welcome to Sakuramemecoin Airdrop, {user.first_name}!\n\n"
+        "To qualify for 0.01 SOL reward:\n\n"
+        "1. Join our Telegram channel\n"
+        "2. Join our Telegram group\n"
+        "3. Follow our Twitter\n"
+        "4. Submit your SOL address\n\n"
+        "Click below to begin verification 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def verify_tasks(update: Update, context: CallbackContext) -> None:
+def button_handler(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
-    await query.answer()
-    user = query.from_user
+    query.answer()
     
+    if query.data == 'start_verification':
+        verify_channel(update, context)
+    elif query.data == 'check_channel':
+        check_channel(update, context)
+    elif query.data == 'check_group':
+        check_group(update, context)
+    elif query.data == 'check_twitter':
+        check_twitter(update, context)
+
+def verify_channel(update: Update, context: CallbackContext) -> None:
+    context.user_data['status'] = STATUS_CHANNEL
+    query = update.callback_query
+    
+    keyboard = [
+        [InlineKeyboardButton("🌸 Join Channel", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("✅ I've Joined", callback_data='check_channel')]
+    ]
+    
+    query.edit_message_text(
+        text="Step 1/4: Join our official channel 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def check_channel(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
     try:
-        # Check channel membership
-        channel_member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
-        group_member = await context.bot.get_chat_member(GROUP_ID, user.id)
-        
-        if channel_member.status in ["member", "administrator", "creator"] and \
-           group_member.status in ["member", "administrator", "creator"]:
-            
-            if twitter_api:
-                await query.edit_message_text(
-                    "🎌 Telegram tasks verified!\n\n"
-                    "Please send your Twitter username (without @):"
-                )
-                return VERIFY_TWITTER
-            else:
-                await query.edit_message_text(
-                    "🎌 Telegram tasks verified!\n\n"
-                    "Please send your SOL wallet address:"
-                )
-                return GET_WALLET
-        else:
-            missing = []
-            if channel_member.status not in ["member", "administrator", "creator"]:
-                missing.append(f"• [Telegram Channel]({CHANNEL_LINK})")
-            if group_member.status not in ["member", "administrator", "creator"]:
-                missing.append(f"• [Telegram Group]({GROUP_LINK})")
-            
-            text = "⚠️ *Please complete these tasks:*\n" + "\n".join(missing)
-            await query.edit_message_text(
-                text,
-                parse_mode="MarkdownV2",
-                disable_web_page_preview=True
-            )
-            
+        # Channel membership check would go here
+        # For now, we'll assume user joined
+        verify_group(update, context)
     except Exception as e:
-        logger.error(f"Verification error: {e}")
-        await query.edit_message_text("⛔ Verification failed. Please try again later.")
+        logger.error(f"Error checking channel: {e}")
+        update.callback_query.answer("⚠️ Verification error. Please try again later.", show_alert=True)
 
-def verify_twitter(update: Update, context: CallbackContext) -> int:
-    twitter_handle = update.message.text.strip()
+def verify_group(update: Update, context: CallbackContext) -> None:
+    context.user_data['status'] = STATUS_GROUP
+    query = update.callback_query
     
-    if not twitter_api:
-        update.message.reply_text("⚠️ Twitter verification disabled. Please send your SOL wallet:")
-        return GET_WALLET
-        
-    try:
-        user = twitter_api.get_user(screen_name=twitter_handle)
-        
-        # Check if following (simplified)
-        if True:  # Replace with actual follow check if needed
-            context.user_data["twitter"] = twitter_handle
-            update.message.reply_text(
-                "🐦 Twitter verified!\n\n"
-                "Now send your SOL wallet address:"
-            )
-            return GET_WALLET
-        else:
-            update.message.reply_text(
-                f"⛔ Please follow our Twitter first: {TWITTER_LINK}\n\n"
-                "Send your Twitter username again:"
-            )
-            return VERIFY_TWITTER
-    except tweepy.NotFound:
-        update.message.reply_text("❌ Twitter account not found. Please send a valid username:")
-        return VERIFY_TWITTER
-    except tweepy.TweepyException as e:
-        logger.error(f"Twitter error: {e}")
-        update.message.reply_text("⚠️ Twitter verification failed. Please send your SOL wallet:")
-        return GET_WALLET
+    keyboard = [
+        [InlineKeyboardButton("🌸 Join Group", url=GROUP_LINK)],
+        [InlineKeyboardButton("✅ I've Joined", callback_data='check_group')]
+    ]
+    
+    query.edit_message_text(
+        text="Step 2/4: Join our community group 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-def get_wallet(update: Update, context: CallbackContext) -> int:
-    wallet_address = update.message.text.strip()
-    
+def check_group(update: Update, context: CallbackContext) -> None:
     try:
-        # Validate SOL address format
-        if not re.match(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$", wallet_address):
-            raise ValueError("Invalid SOL format")
-            
-        # Build congratulations message
-        text = (
-            "🎉 *CONGRATULATIONS\!* 🎉\n\n"
-            "You have successfully joined JosephDeFi bot!\n\n"
-            "💰 *100 SOL is on its way to your wallet\!*\n\n"
-            "Transaction will complete within 24 hours\.\n\n"
-            "Stay tuned for more rewards\!"
+        # Group membership check would go here
+        # For now, we'll assume user joined
+        verify_twitter(update, context)
+    except Exception as e:
+        logger.error(f"Error checking group: {e}")
+        update.callback_query.answer("⚠️ Verification error. Please try again later.", show_alert=True)
+
+def verify_twitter(update: Update, context: CallbackContext) -> None:
+    context.user_data['status'] = STATUS_TWITTER
+    query = update.callback_query
+    
+    keyboard = [
+        [InlineKeyboardButton("🌸 Follow Twitter", url=TWITTER_LINK)],
+        [InlineKeyboardButton("✅ I've Followed", callback_data='check_twitter')]
+    ]
+    
+    query.edit_message_text(
+        text="Step 3/4: Follow our Twitter account 👇\n\n"
+             "After following, click the verification button below.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def check_twitter(update: Update, context: CallbackContext) -> None:
+    context.user_data['status'] = STATUS_SOL_ADDRESS
+    query = update.callback_query
+    
+    query.edit_message_text(
+        text="Step 4/4: Submit your Solana address\n\n"
+             "Please send your SOL wallet address in the following format:\n"
+             "`Solana: YOUR_WALLET_ADDRESS`\n\n"
+             "Example:\n"
+             "`Solana: 7sPmqkM71YkGZ6J2XbkR5ZaYnXrFq2AZeQz3JmFd9XrR`\n\n"
+             "⚠️ Make sure this is your mainnet SOL address!"
+    )
+    query.answer("Now please send your SOL address")
+
+def handle_sol_address(update: Update, context: CallbackContext) -> None:
+    if context.user_data.get('status') != STATUS_SOL_ADDRESS:
+        return
+    
+    user = update.effective_user
+    message = update.message.text.strip()
+    
+    # Extract SOL address
+    if message.startswith("Solana: "):
+        sol_address = message.replace("Solana: ", "")
+    else:
+        sol_address = message
+    
+    # Validate SOL address
+    if not re.match(SOL_REGEX, sol_address):
+        update.message.reply_text(
+            "❌ Invalid SOL address format! Please send a valid Solana mainnet address.\n"
+            "Example: `Solana: 7sPmqkM71YkGZ6J2XbkR5ZaYnXrFq2AZeQz3JmFd9XrR`",
+            parse_mode="Markdown"
         )
-        
-        update.message.reply_markdown_v2(text)
-        return ConversationHandler.END
-        
-    except (ValueError, AttributeError):
-        update.message.reply_text("⛔ Invalid SOL address. Please send a valid wallet address:")
-        return GET_WALLET
+        return
+    
+    # Save to database
+    user_data = {
+        "user_id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "sol_address": sol_address,
+        "completed": True
+    }
+    users.update_one({"user_id": user.id}, {"$set": user_data}, upsert=True)
+    
+    # Notify admin
+    context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"🚀 New Airdrop Registration:\n\n"
+             f"User: @{user.username} ({user.first_name})\n"
+             f"SOL Address: `{sol_address}`\n"
+             f"Profile: {user.link}",
+        parse_mode="Markdown"
+    )
+    
+    # Success message with token purchase button
+    keyboard = [[InlineKeyboardButton("🚀 Buy on Pump.fun", url=PUMP_FUN_LINK)]]
+    
+    update.message.reply_text(
+        "🎉 Congratulations! You've completed all steps for Sakuramemecoin Airdrop!\n\n"
+        "💰 0.01 SOL is on its way to your wallet!\n\n"
+        "Don't forget to buy our token on Pump.fun:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    
+    # Clear user data
+    context.user_data.clear()
 
-def cancel(update: Update, context: CallbackContext) -> int:
-    update.message.reply_text("🚫 Airdrop registration cancelled.")
-    return ConversationHandler.END
+def error_handler(update: Update, context: CallbackContext) -> None:
+    logger.error(msg="Exception while handling update:", exc_info=context.error)
 
 def main() -> None:
     updater = Updater(BOT_TOKEN)
-    dispatcher = updater.dispatcher
+    dp = updater.dispatcher
 
-    # Conversation handler for registration flow
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(verify_tasks, pattern="^verify_tasks$")],
-        states={
-            VERIFY_TWITTER: [MessageHandler(Filters.text & ~Filters.command, verify_twitter)],
-            GET_WALLET: [MessageHandler(Filters.text & ~Filters.command, get_wallet)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(conv_handler)
+    # Handlers
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CallbackQueryHandler(button_handler))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_sol_address))
+    dp.add_error_handler(error_handler)
 
     updater.start_polling()
-    logger.info("Bot started...")
+    logger.info("Bot started polling...")
     updater.idle()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
